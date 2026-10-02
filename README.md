@@ -103,6 +103,10 @@ key is lost, installed apps can't be updated and everyone has to reinstall,
 so keep a backup of it. On Linux, only the AppImage updates itself; the
 `.deb` has to be reinstalled.
 
+## Testers
+
+[`TESTING.md`](TESTING.md) is the guide to send people trying the app: download, install past the unsigned-app warnings, set up keys, caption a video and send feedback.
+
 ## Layout
 
 ```
