@@ -53,6 +53,10 @@ struct BusyGuard<'a> {
 }
 
 impl AppState {
+    fn is_busy(&self, key: &str) -> bool {
+        self.busy.lock().unwrap_or_else(|e| e.into_inner()).contains(key)
+    }
+
     fn begin(&self, key: &str) -> Result<BusyGuard<'_>> {
         let mut busy = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         if !busy.insert(key.to_string()) {
@@ -95,15 +99,22 @@ fn progress_emitter(app: AppHandle, project_id: Option<String>) -> impl Fn(Stage
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ProjectView {
     project: Project,
     preview_url: String,
+    /// False until the preview has been made (see `build_preview`).
+    preview_ready: bool,
 }
 
 fn view(state: &AppState, project: Project) -> ProjectView {
     let preview_url = state.preview.url(&project.id, project.created_at);
-    ProjectView { project, preview_url }
+    let preview_ready = pipeline::preview_ready(&state.store, &project.id);
+    ProjectView {
+        project,
+        preview_url,
+        preview_ready,
+    }
 }
 
 #[derive(Serialize)]
@@ -173,14 +184,28 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>
 }
 
 #[tauri::command]
-async fn import_video(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<ProjectView> {
+async fn import_video(state: State<'_, AppState>, path: String) -> Result<ProjectView> {
     let _guard = state.begin(&format!("import:{path}"))?;
-    let progress = progress_emitter(app, None);
     let path = PathBuf::from(path);
-    let work = pipeline::import(&state.tools, &state.store, &path, &progress);
+    let work = pipeline::import(&state.tools, &state.store, &path);
     let project = state.log.step("import", work).await?;
     state.log.line(format!("  video: {}", diag::describe_media(&project.info)));
     Ok(view(&state, project))
+}
+
+/// Makes the editor's preview. Runs alongside transcription, so it has its
+/// own busy key.
+#[tauri::command]
+async fn build_preview(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<ProjectView> {
+    let _guard = state.begin(&format!("preview:{id}"))?;
+    let progress = progress_emitter(app, Some(id.clone()));
+    let work = pipeline::build_preview(&state.tools, &state.store, &id, &progress);
+    match state.log.step("preview", work).await? {
+        pipeline::PreviewKind::Source => state.log.line("  playing the source as it is"),
+        pipeline::PreviewKind::Transcoded => state.log.line("  made a preview copy"),
+        pipeline::PreviewKind::AlreadyThere => {}
+    }
+    Ok(view(&state, state.store.load(&id)?))
 }
 
 #[tauri::command]
@@ -252,8 +277,11 @@ async fn export_project(
     out_path: String,
     wrapped: Vec<String>,
 ) -> Result<ProjectView> {
+    if state.is_busy(&measure_key(&id)) {
+        return Err(msg("Still measuring the last export's quality. Try again in a moment."));
+    }
     let _guard = state.begin(&id)?;
-    let progress = progress_emitter(app, Some(id.clone()));
+    let progress = progress_emitter(app.clone(), Some(id.clone()));
     let quality = state.settings.load().export_quality;
     let out_path = PathBuf::from(out_path);
     let work = pipeline::export(
@@ -265,11 +293,36 @@ async fn export_project(
         quality,
         &progress,
     );
-    let project = state.log.step(&format!("export ({quality:?})"), work).await?;
+    let (project, pending) = state.log.step(&format!("export ({quality:?})"), work).await?;
+    tauri::async_runtime::spawn(measure_in_background(app, id, pending));
+    Ok(view(&state, project))
+}
+
+fn measure_key(id: &str) -> String {
+    format!("measure:{id}")
+}
+
+/// Scores a finished export while the user already has the file, then sends
+/// the updated project as `export-measured`.
+async fn measure_in_background(app: AppHandle, id: String, pending: pipeline::PendingMeasure) {
+    let state = app.state::<AppState>();
+    let Ok(_guard) = state.begin(&measure_key(&id)) else {
+        return;
+    };
+    let progress = progress_emitter(app.clone(), Some(id.clone()));
+    let work = pipeline::measure_export(&state.tools, &state.store, &id, pending, &progress);
+    let project = match state.log.step("measure quality", work).await {
+        Ok(project) => project,
+        // Still tell the editor, so it stops waiting for the score.
+        Err(_) => match state.store.load(&id) {
+            Ok(project) => project,
+            Err(_) => return,
+        },
+    };
     if let Some(record) = &project.last_export {
         state.log.line(format!("  {}", diag::describe_report(&record.report)));
     }
-    Ok(view(&state, project))
+    let _ = app.emit("export-measured", view(&state, project));
 }
 
 /// Copies a diagnostic report to the clipboard for a tester to send: app and
@@ -339,6 +392,7 @@ pub fn run() {
             delete_api_key,
             list_projects,
             import_video,
+            build_preview,
             open_project,
             delete_project,
             save_edits,

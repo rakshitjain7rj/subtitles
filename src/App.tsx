@@ -11,7 +11,7 @@ import "./App.css";
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [open, setOpen] = useState<ProjectView | null>(null);
+  const [open, setOpen] = useState<{ view: ProjectView; fresh: boolean } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   // Shown on launch while keys are missing, until finished or put off.
   const [setupDismissed, setSetupDismissed] = useState(false);
@@ -45,14 +45,20 @@ export default function App() {
         />
       ) : open ? (
         <Editor
-          key={open.project.id}
-          initial={open}
+          key={open.view.project.id}
+          initial={open.view}
+          fresh={open.fresh}
           status={status}
           onBack={() => setOpen(null)}
           onOpenSettings={() => setShowSettings(true)}
         />
       ) : (
-        <Home status={status} statusError={statusError} onOpen={setOpen} onOpenSettings={() => setShowSettings(true)} />
+        <Home
+          status={status}
+          statusError={statusError}
+          onOpen={(view, fresh = false) => setOpen({ view, fresh })}
+          onOpenSettings={() => setShowSettings(true)}
+        />
       )}
       {showSettings && (
         <Settings

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ask, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, errorMessage, onProgress } from "../lib/api";
+import { api, errorMessage, onExportMeasured, onProgress } from "../lib/api";
 import { insertAt, mergeWithNext, nudge, remove, setText, split } from "../lib/captions";
 import { describeVideo, estimateCostUsd, usd } from "../lib/format";
 import { STYLE_LIMITS } from "../lib/style";
@@ -26,6 +26,8 @@ const TYPING_PAUSE_MS = 1500;
 
 interface Props {
   initial: ProjectView;
+  /** Just added: start captioning at once instead of waiting for a click. */
+  fresh: boolean;
   status: Status | null;
   onBack: () => void;
   onOpenSettings: () => void;
@@ -36,7 +38,7 @@ interface Busy {
   fraction: number | null;
 }
 
-export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
+export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props) {
   const [view, setView] = useState(initial);
   const [captions, setCaptions] = useState<Caption[]>(initial.project.captions);
   const [style, setStyle] = useState<Style>(initial.project.style);
@@ -46,6 +48,12 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [showReport, setShowReport] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "failed">("saved");
+  // The preview and the quality check run alongside other work, so they have
+  // their own progress rather than the single `busy` banner.
+  const [previewReady, setPreviewReady] = useState(initial.preview_ready);
+  const [previewFraction, setPreviewFraction] = useState<number | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [measuring, setMeasuring] = useState<number | null | false>(false);
 
   const preview = useRef<PreviewHandle>(null);
   const undoStack = useRef<Caption[][]>([]);
@@ -175,7 +183,31 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
 
   useEffect(() => {
     const unlisten = onProgress((p) => {
-      if (p.project_id === id) setBusy((cur) => (cur ? { stage: p.stage, fraction: p.fraction } : cur));
+      if (p.project_id !== id) return;
+      if (p.stage === "preview") setPreviewFraction(p.fraction);
+      else if (p.stage === "verify") setMeasuring((cur) => (cur === false ? cur : p.fraction));
+      else setBusy((cur) => (cur ? { stage: p.stage, fraction: p.fraction } : cur));
+    });
+    return () => void unlisten.then((f) => f());
+  }, [id]);
+
+  useEffect(() => {
+    if (previewReady) return;
+    api.buildPreview(id).then(
+      () => setPreviewReady(true),
+      (e) => setPreviewError(errorMessage(e)),
+    );
+    // Only on opening; the preview is built once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // The score arrives after the file is written; take only the export record,
+  // so edits made meanwhile are kept.
+  useEffect(() => {
+    const unlisten = onExportMeasured((next) => {
+      if (next.project.id !== id) return;
+      setView((cur) => ({ ...cur, project: { ...cur.project, last_export: next.project.last_export } }));
+      setMeasuring(false);
     });
     return () => void unlisten.then((f) => f());
   }, [id]);
@@ -210,6 +242,15 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
   const translator = status?.settings.translator ?? "gemini";
   const translatorName = translator === "gemini" ? "Gemini" : "Claude";
   const keysReady = !!status && hasTranslatorKey(status) && (hasTranscript || status.has_elevenlabs_key);
+
+  // A new video starts captioning straight away, once, while the preview is made.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!fresh || autoStarted.current || !keysReady || hasTranscript || captions.length > 0) return;
+    autoStarted.current = true;
+    void generate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fresh, keysReady]);
 
   async function generate() {
     await run(hasTranscript ? "translate" : "audio", async () => {
@@ -246,7 +287,10 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
       const { captions, style } = latest.current;
       return api.exportProject(id, path, wrapAll(captions, info.width, info.height, style));
     });
-    if (exported) setShowReport(true);
+    if (exported) {
+      setMeasuring(null);
+      setShowReport(true);
+    }
   }
 
   // --- render -------------------------------------------------------------
@@ -278,7 +322,12 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
             Last export
           </button>
         )}
-        <button className="primary" onClick={exportVideo} disabled={busy !== null || !hasCaptions}>
+        <button
+          className="primary"
+          onClick={exportVideo}
+          disabled={busy !== null || !hasCaptions || measuring !== false}
+          title={measuring !== false ? "Measuring the last export's quality" : undefined}
+        >
           Export video
         </button>
       </header>
@@ -302,7 +351,8 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
         <section className="editor-left">
           <VideoPreview
             ref={preview}
-            url={view.preview_url}
+            url={previewReady ? view.preview_url : null}
+            preparing={previewError ?? previewFraction}
             info={info}
             captions={captions}
             style={style}
@@ -362,27 +412,39 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
             </>
           ) : (
             <div className="empty">
-              <h2>{hasTranscript ? "Translate the transcript" : "Generate captions"}</h2>
-              <p className="muted">
-                {hasTranscript
-                  ? "The speech is already transcribed and saved. Translating turns it into short English captions."
-                  : "The speech is transcribed with word timings, then translated into short English captions you can review and edit."}
-              </p>
-              {keysReady ? (
+              {busy ? (
                 <>
-                  <button className="primary" onClick={generate} disabled={busy !== null}>
-                    {hasTranscript ? "Translate" : "Generate captions"}
-                  </button>
-                  <p className="muted small">{costNote}</p>
+                  <h2>Making captions…</h2>
+                  <p className="muted">
+                    The speech is being transcribed and translated. A one-minute video usually takes under a minute.
+                    You can watch the preview meanwhile.
+                  </p>
                 </>
               ) : (
                 <>
-                  <button className="primary" onClick={onOpenSettings}>
-                    Add API keys
-                  </button>
-                  <p className="muted small">
-                    Needed first: {hasTranscript ? "" : "an ElevenLabs key and "}a {translatorName} key.
+                  <h2>{hasTranscript ? "Translate the transcript" : "Generate captions"}</h2>
+                  <p className="muted">
+                    {hasTranscript
+                      ? "The speech is already transcribed and saved. Translating turns it into short English captions."
+                      : "The speech is transcribed with word timings, then translated into short English captions you can review and edit."}
                   </p>
+                  {keysReady ? (
+                    <>
+                      <button className="primary" onClick={generate}>
+                        {hasTranscript ? "Translate" : "Generate captions"}
+                      </button>
+                      <p className="muted small">{costNote}</p>
+                    </>
+                  ) : (
+                    <>
+                      <button className="primary" onClick={onOpenSettings}>
+                        Add API keys
+                      </button>
+                      <p className="muted small">
+                        Needed first: {hasTranscript ? "" : "an ElevenLabs key and "}a {translatorName} key.
+                      </p>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -390,7 +452,7 @@ export function Editor({ initial, status, onBack, onOpenSettings }: Props) {
         </section>
       </div>
 
-      {showReport && project.last_export && <ExportReport record={project.last_export} onClose={() => setShowReport(false)} />}
+      {showReport && project.last_export && <ExportReport record={project.last_export} measuring={measuring} onClose={() => setShowReport(false)} />}
     </div>
   );
 }

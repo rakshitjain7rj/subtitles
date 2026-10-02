@@ -12,7 +12,7 @@ use crate::error::{msg, Result};
 use crate::ffmpeg::{run_capture, run_with_progress, Tools};
 use crate::keys::{self, Provider};
 use crate::probe::{probe, MediaInfo};
-use crate::project::{now, ExportRecord, Project, Store, AUDIO_FILE, PREVIEW_FILE};
+use crate::project::{now, ExportRecord, Project, Store, AUDIO_FILE, PREVIEW_FILE, PREVIEW_SOURCE_FILE};
 use crate::quality::{self, Measurement, CEILING_LOG, VMAF_LOG};
 use crate::transcribe::scribe::Scribe;
 use crate::transcribe::Transcriber;
@@ -48,7 +48,9 @@ fn source_of(project: &Project) -> Result<PathBuf> {
 
 /// Probes the video and builds its preview. Importing the same file again
 /// reopens the existing project instead of starting over.
-pub async fn import(tools: &Tools, store: &Store, source: &Path, progress: Progress<'_>) -> Result<Project> {
+/// Creates the project for a video (or finds the existing one). Fast: the
+/// preview is made separately by [`build_preview`].
+pub async fn import(tools: &Tools, store: &Store, source: &Path) -> Result<Project> {
     if !source.is_file() {
         return Err(msg("That file could not be found."));
     }
@@ -60,25 +62,61 @@ pub async fn import(tools: &Tools, store: &Store, source: &Path, progress: Progr
     let info = probe(tools, source).await?;
     let mut project = Project::new(source, info);
     store.save(&mut project)?;
-    if let Err(e) = build_preview(tools, store, &project, progress).await {
-        let _ = store.delete(&project.id);
-        return Err(e);
-    }
     Ok(project)
 }
 
-async fn build_preview(tools: &Tools, store: &Store, project: &Project, progress: Progress<'_>) -> Result<()> {
-    let source = source_of(project)?;
-    let out = store.dir(&project.id)?.join(PREVIEW_FILE);
+/// Whether the editor has something to play: a preview copy, or the source
+/// itself when it plays as it is.
+pub fn preview_ready(store: &Store, id: &str) -> bool {
+    store
+        .dir(id)
+        .is_ok_and(|d| d.join(PREVIEW_FILE).is_file() || d.join(PREVIEW_SOURCE_FILE).is_file())
+}
+
+/// How the preview was made, for the log.
+pub enum PreviewKind {
+    AlreadyThere,
+    /// The source plays as it is, so no copy was made.
+    Source,
+    Transcoded,
+}
+
+/// Gets the editor's preview ready. Runs alongside transcription, so a new
+/// video's captions don't wait for it.
+pub async fn build_preview(tools: &Tools, store: &Store, id: &str, progress: Progress<'_>) -> Result<PreviewKind> {
+    if preview_ready(store, id) {
+        return Ok(PreviewKind::AlreadyThere);
+    }
+    let project = store.load(id)?;
+    let source = source_of(&project)?;
+    let dir = store.dir(id)?;
+    if encode::plays_directly(&project.info, &source) {
+        tokio::fs::write(dir.join(PREVIEW_SOURCE_FILE), source.to_string_lossy().as_bytes()).await?;
+        return Ok(PreviewKind::Source);
+    }
+    // Written under a temporary name so a half-made preview is never served.
+    let partial = dir.join("preview.partial.mp4");
+    transcode_preview(tools, &project, &source, &partial, progress).await?;
+    tokio::fs::rename(&partial, dir.join(PREVIEW_FILE)).await?;
+    Ok(PreviewKind::Transcoded)
+}
+
+async fn transcode_preview(
+    tools: &Tools,
+    project: &Project,
+    source: &Path,
+    out: &Path,
+    progress: Progress<'_>,
+) -> Result<()> {
     let report = |f: f64| progress(Stage::Preview, Some(f));
     let duration = project.info.duration;
-    let with_tonemap = encode::preview_args(&project.info, &source, &out, true);
+    let with_tonemap = encode::preview_args(&project.info, source, out, true);
     match run_with_progress(&tools.ffmpeg, &with_tonemap, None, duration, report).await {
         Ok(()) => Ok(()),
         // An ffmpeg built without zscale can't tone-map; a flat-looking
         // preview is better than none. The export is unaffected.
         Err(_) if project.info.hdr != crate::probe::Hdr::None => {
-            let plain = encode::preview_args(&project.info, &source, &out, false);
+            let plain = encode::preview_args(&project.info, source, out, false);
             run_with_progress(&tools.ffmpeg, &plain, None, duration, report).await
         }
         Err(e) => Err(e),
@@ -177,6 +215,18 @@ pub fn default_export_path(project: &Project) -> PathBuf {
 /// `wrapped` carries the review screen's line breaks, one entry per caption,
 /// so the export wraps exactly as the preview did; without it (or if it
 /// doesn't match the saved captions) libass wraps long captions itself.
+/// What the quality check after an export needs.
+pub struct PendingMeasure {
+    work: PathBuf,
+    source: PathBuf,
+    out: PathBuf,
+    band_top: u32,
+    band_bottom: u32,
+}
+
+/// Encodes the captioned video and records it with its score still to come;
+/// [`measure_export`] fills the score in afterwards, so the file can be used
+/// while it is being measured.
 pub async fn export(
     tools: &Tools,
     store: &Store,
@@ -185,7 +235,7 @@ pub async fn export(
     wrapped: &[String],
     quality: Quality,
     progress: Progress<'_>,
-) -> Result<Project> {
+) -> Result<(Project, PendingMeasure)> {
     let mut project = store.load(id)?;
     let source = source_of(&project)?;
     if project.captions.iter().all(|c| c.english.trim().is_empty()) {
@@ -227,10 +277,16 @@ pub async fn export(
     }
     tokio::fs::rename(&partial, out).await?;
 
-    progress(Stage::Verify, Some(0.0));
     let export_info = probe(tools, out).await?;
-    let m = measure(tools, &work, &source, out, info, &layout, progress).await;
-    let report = quality::build_report(info.clone(), export_info, quality, m);
+    let unmeasured = Measurement {
+        vmaf: None,
+        ceiling: None,
+        fraction: 0.0,
+        step: quality::frame_step(info.frame_count),
+        notes: Vec::new(),
+    };
+    let mut report = quality::build_report(info.clone(), export_info, quality, unmeasured);
+    report.pending = true;
 
     let fresh_info = project.info.clone();
     let mut project = store.load(id)?;
@@ -241,6 +297,44 @@ pub async fn export(
         report,
     });
     store.save(&mut project)?;
+    let pending = PendingMeasure {
+        work,
+        source,
+        out: out.to_path_buf(),
+        band_top: layout.band_top,
+        band_bottom: layout.band_bottom,
+    };
+    Ok((project, pending))
+}
+
+/// Scores an export against its source and saves the result into the
+/// project's export record, unless a newer export has replaced it meanwhile.
+pub async fn measure_export(
+    tools: &Tools,
+    store: &Store,
+    id: &str,
+    pending: PendingMeasure,
+    progress: Progress<'_>,
+) -> Result<Project> {
+    progress(Stage::Verify, Some(0.0));
+    let info = store.load(id)?.info;
+    let m = measure(
+        tools,
+        &pending.work,
+        &pending.source,
+        &pending.out,
+        &info,
+        (pending.band_top, pending.band_bottom),
+        progress,
+    )
+    .await;
+    let mut project = store.load(id)?;
+    let out = pending.out.to_string_lossy();
+    if let Some(record) = project.last_export.as_mut().filter(|r| r.path == out) {
+        let r = &record.report;
+        record.report = quality::build_report(r.source.clone(), r.export.clone(), r.quality, m);
+        store.save(&mut project)?;
+    }
     Ok(project)
 }
 
@@ -260,10 +354,10 @@ async fn measure(
     source: &Path,
     export: &Path,
     info: &MediaInfo,
-    layout: &ass::Layout,
+    (band_top, band_bottom): (u32, u32),
     progress: Progress<'_>,
 ) -> Measurement {
-    let bands = quality::measured_bands(info.height, layout.band_top, layout.band_bottom);
+    let bands = quality::measured_bands(info.height, band_top, band_bottom);
     let step = quality::frame_step(info.frame_count);
     let mut m = Measurement {
         vmaf: None,
@@ -393,10 +487,20 @@ mod tests {
 
         let store = Store::new(root.join("projects"));
         let quiet = |_: Stage, _: Option<f64>| {};
-        let mut project = import(&tools, &store, &source, &quiet).await.expect("import");
-        assert!(store.dir(&project.id).unwrap().join(PREVIEW_FILE).is_file());
+        let mut project = import(&tools, &store, &source).await.expect("import");
+        assert!(!preview_ready(&store, &project.id));
+        let kind = build_preview(&tools, &store, &project.id, &quiet).await.expect("preview");
+        assert!(preview_ready(&store, &project.id));
+        // A source the webviews can play is used as it is; others get a copy.
+        let copied = store.dir(&project.id).unwrap().join(PREVIEW_FILE).is_file();
+        assert_eq!(copied, matches!(kind, PreviewKind::Transcoded));
+        assert_eq!(copied, !encode::plays_directly(&project.info, &source));
+        assert!(matches!(
+            build_preview(&tools, &store, &project.id, &quiet).await.unwrap(),
+            PreviewKind::AlreadyThere
+        ));
         // Importing the same file again reopens the project.
-        assert_eq!(import(&tools, &store, &source, &quiet).await.unwrap().id, project.id);
+        assert_eq!(import(&tools, &store, &source).await.unwrap().id, project.id);
 
         project.captions = vec![
             caption(0.2, 1.4, "This is a test"),
@@ -405,10 +509,15 @@ mod tests {
         store.save(&mut project).unwrap();
         let out = default_export_path(&project);
         let wrapped = vec!["This is\na test".to_string(), "of burned-in captions".to_string()];
-        let project = export(&tools, &store, &project.id, &out, &wrapped, quality, &quiet)
+        let (project, pending) = export(&tools, &store, &project.id, &out, &wrapped, quality, &quiet)
             .await
             .expect("export");
+        assert!(project.last_export.as_ref().unwrap().report.pending);
         assert!(out.is_file());
+        let project = measure_export(&tools, &store, &project.id, pending, &quiet)
+            .await
+            .expect("measure");
+        assert!(!project.last_export.as_ref().unwrap().report.pending);
         assert!(!out.with_extension("partial.mp4").exists());
         (project, root)
     }

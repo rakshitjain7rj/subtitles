@@ -15,6 +15,8 @@ use crate::transcribe::Word;
 
 const PROJECT_FILE: &str = "project.json";
 pub const PREVIEW_FILE: &str = "preview.mp4";
+/// Holds the source's path when the source itself is played as the preview.
+pub const PREVIEW_SOURCE_FILE: &str = "preview.source";
 pub const AUDIO_FILE: &str = "audio.flac";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

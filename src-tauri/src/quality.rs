@@ -47,6 +47,9 @@ pub struct QualityReport {
     pub source: MediaInfo,
     pub export: MediaInfo,
     pub notes: Vec<String>,
+    /// The export is written and the score is still being measured.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 /// The rows to measure, as `(y, height)`: whatever lies above and below the
@@ -186,6 +189,7 @@ pub fn build_report(source: MediaInfo, export: MediaInfo, quality: Quality, m: M
         source,
         export,
         notes,
+        pending: false,
     }
 }
 

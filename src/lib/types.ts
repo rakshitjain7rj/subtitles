@@ -58,6 +58,8 @@ export interface QualityReport {
   vmaf: VmafStats | null;
   /** The original scored against itself: the best this video can get. Missing on older reports. */
   ceiling?: number | null;
+  /** The file is written and its score is still being measured. */
+  pending?: boolean;
   quality?: Quality;
   measured_fraction: number;
   frame_step: number;
@@ -97,6 +99,8 @@ export interface Project {
 export interface ProjectView {
   project: Project;
   preview_url: string;
+  /** False until `buildPreview` has made the preview. */
+  preview_ready: boolean;
 }
 
 export interface ProjectSummary {

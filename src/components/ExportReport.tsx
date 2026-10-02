@@ -1,6 +1,7 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { describeVideo, fileName, fileSize, fps } from "../lib/format";
 import type { ExportRecord, QualityReport } from "../lib/types";
+import { Progress } from "./Home";
 
 type Tone = "good" | "fair" | "poor";
 
@@ -39,7 +40,14 @@ function checks(r: QualityReport): { label: string; ok: boolean; detail: string 
   return list;
 }
 
-export function ExportReport({ record, onClose }: { record: ExportRecord; onClose: () => void }) {
+interface Props {
+  record: ExportRecord;
+  /** While the score is being measured: progress, or null when unknown. `false` when not measuring. */
+  measuring: number | null | false;
+  onClose: () => void;
+}
+
+export function ExportReport({ record, measuring, onClose }: Props) {
   const r = record.report;
   const v = r.vmaf ? verdict(r.vmaf.mean, r.ceiling) : null;
   const sampling = r.frame_step > 1 ? `, every ${r.frame_step}th frame` : "";
@@ -54,7 +62,17 @@ export function ExportReport({ record, onClose }: { record: ExportRecord; onClos
         </header>
 
         <div className="score">
-          {r.vmaf && v ? (
+          {r.pending ? (
+            measuring !== false ? (
+              <div className="measuring">
+                <strong>Measuring quality against the original…</strong>
+                <Progress fraction={measuring} />
+                <p className="muted small">The file is ready to use. The score appears here when the check finishes.</p>
+              </div>
+            ) : (
+              <strong>The quality check didn't finish for this export.</strong>
+            )
+          ) : r.vmaf && v ? (
             <>
               <div className={`score-number ${v.tone}`}>
                 {r.vmaf.mean.toFixed(1)}

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use crate::error::{msg, Result};
-use crate::project::{valid_id, PREVIEW_FILE};
+use crate::project::{valid_id, PREVIEW_FILE, PREVIEW_SOURCE_FILE};
 
 pub struct PreviewServer {
     port: u16,
@@ -76,8 +76,28 @@ fn resolve(url: &str, root: &std::path::Path, token: &str) -> Option<PathBuf> {
     (parts.next().is_none() && tok == token && valid_id(id) && file == PREVIEW_FILE).then(|| root.join(id).join(file))
 }
 
+/// The preview copy, or the source it stands for when the source is played
+/// as it is (its path is then in `preview.source` beside it).
+fn playable(preview: PathBuf) -> PathBuf {
+    if preview.is_file() {
+        return preview;
+    }
+    preview
+        .parent()
+        .and_then(|dir| std::fs::read_to_string(dir.join(PREVIEW_SOURCE_FILE)).ok())
+        .map(PathBuf::from)
+        .unwrap_or(preview)
+}
+
+fn content_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("mov") => "video/quicktime",
+        _ => "video/mp4",
+    }
+}
+
 fn serve(request: Request, root: &std::path::Path, token: &str) {
-    let Some(path) = resolve(request.url(), root, token) else {
+    let Some(path) = resolve(request.url(), root, token).map(playable) else {
         let _ = request.respond(Response::empty(StatusCode(404)));
         return;
     };
@@ -93,7 +113,7 @@ fn serve(request: Request, root: &std::path::Path, token: &str) {
         .map(|h| h.value.as_str().to_string());
 
     let common = [
-        header("Content-Type", "video/mp4"),
+        header("Content-Type", content_type(&path)),
         header("Accept-Ranges", "bytes"),
         header("Cache-Control", "no-store"),
     ];
@@ -170,6 +190,23 @@ mod tests {
         assert_eq!(parse_range("bytes=1000-", 1000), None);
         assert_eq!(parse_range("bytes=5-2", 1000), None);
         assert_eq!(parse_range("items=0-1", 1000), None);
+    }
+
+    #[tokio::test]
+    async fn serves_the_source_when_it_is_the_preview() {
+        let root = std::env::temp_dir().join(format!("subtitles-preview-{}", uuid::Uuid::new_v4()));
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(root.join(&id)).unwrap();
+        let source = root.join("clip.MOV");
+        std::fs::write(&source, b"source bytes").unwrap();
+        std::fs::write(root.join(&id).join(PREVIEW_SOURCE_FILE), source.to_string_lossy().as_bytes()).unwrap();
+        let server = PreviewServer::start(root.clone()).unwrap();
+
+        let resp = reqwest::get(server.url(&id, 1)).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"], "video/quicktime");
+        assert_eq!(resp.text().await.unwrap(), "source bytes");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

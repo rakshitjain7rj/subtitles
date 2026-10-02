@@ -12,7 +12,10 @@ export interface PreviewHandle {
 }
 
 interface Props {
-  url: string;
+  /** Null while the preview is still being made. */
+  url: string | null;
+  /** While `url` is null: progress (null when unknown) or why it failed. */
+  preparing?: number | string | null;
   info: MediaInfo;
   captions: Caption[];
   style: Style;
@@ -22,7 +25,7 @@ interface Props {
 
 /** The video with the captions drawn over it the way the export will burn them in. */
 export const VideoPreview = forwardRef<PreviewHandle, Props>(function VideoPreview(
-  { url, info, captions, style, onActiveChange },
+  { url, preparing = null, info, captions, style, onActiveChange },
   ref,
 ) {
   const stage = useRef<HTMLDivElement>(null);
@@ -100,7 +103,7 @@ export const VideoPreview = forwardRef<PreviewHandle, Props>(function VideoPrevi
         <div className="preview-frame" style={box} onClick={toggle}>
           <video
             ref={video}
-            src={url}
+            src={url ?? undefined}
             playsInline
             preload="auto"
             onPlay={() => setPlaying(true)}
@@ -116,6 +119,17 @@ export const VideoPreview = forwardRef<PreviewHandle, Props>(function VideoPrevi
               <div className="caption-overlay" style={overlayCss(info.width, info.height, style)}>
                 {text}
               </div>
+            </div>
+          )}
+          {url === null && (
+            <div className="preview-pending">
+              {typeof preparing === "string" ? (
+                <span>The preview could not be made: {preparing} Captions and export still work.</span>
+              ) : (
+                <span>
+                  Preparing preview…{typeof preparing === "number" ? ` ${Math.round(preparing * 100)}%` : ""}
+                </span>
+              )}
             </div>
           )}
           {failed && <div className="preview-error">The preview could not be played. Captions and export still work.</div>}

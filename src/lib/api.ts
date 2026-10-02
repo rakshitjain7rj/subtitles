@@ -13,6 +13,7 @@ export const api = {
   copyDiagnostics: () => invoke<void>("copy_diagnostics"),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   importVideo: (path: string) => invoke<ProjectView>("import_video", { path }),
+  buildPreview: (id: string) => invoke<ProjectView>("build_preview", { id }),
   openProject: (id: string) => invoke<ProjectView>("open_project", { id }),
   deleteProject: (id: string) => invoke<void>("delete_project", { id }),
   saveEdits: (id: string, captions: Caption[], style: Style) => invoke<void>("save_edits", { id, captions, style }),
@@ -26,6 +27,11 @@ export const api = {
 
 export function onProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {
   return listen<ProgressEvent>("progress", (e) => handler(e.payload));
+}
+
+/** The score of an export, measured after the file was written. */
+export function onExportMeasured(handler: (view: ProjectView) => void): Promise<UnlistenFn> {
+  return listen<ProjectView>("export-measured", (e) => handler(e.payload));
 }
 
 /** Commands reject with a plain string; anything else is stringified. */

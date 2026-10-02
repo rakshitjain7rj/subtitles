@@ -16,7 +16,7 @@ pub const FONTS_DIR: &str = "fonts";
 // most of the gap to the VMAF of the source against itself (97.30 against
 // 97.43, where CRF 16 gave 97.15) at about the source's own file size.
 const X264_CRF: &str = "12";
-const X264_PRESET: &str = "slow";
+const X264_PRESET: &str = "fast";
 const X265_CRF: &str = "12";
 const X265_PRESET: &str = "medium";
 
@@ -51,6 +51,25 @@ pub fn audio_args(src: &Path, out: &Path) -> Vec<String> {
     ]));
     a.push(path_arg(out));
     a
+}
+
+/// Whether the webviews can play `src` as it is, so no preview copy has to be
+/// made: 8-bit SDR H.264 up to 1080p60 with AAC or MP3 audio, in MP4 or MOV.
+pub fn plays_directly(info: &MediaInfo, src: &Path) -> bool {
+    let container = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"));
+    container
+        && info.video_codec == "h264"
+        && matches!(info.pix_fmt.as_str(), "yuv420p" | "yuvj420p")
+        && info.bit_depth == 8
+        && info.hdr == Hdr::None
+        && !info.dolby_vision
+        && info.width.min(info.height) <= 1080
+        && info.width.max(info.height) <= 1920
+        && info.fps <= 60.5
+        && info.audio_codec.as_deref().is_none_or(|a| matches!(a, "aac" | "mp3"))
 }
 
 /// A small H.264 copy that every webview can play. `tonemap` converts HDR to
@@ -326,6 +345,32 @@ mod tests {
         let mut pcm = sdr.clone();
         pcm.audio_codec = Some("pcm_s16le".into());
         assert_eq!(output_extension(&PathBuf::from("a.mp4"), &pcm), "mov");
+    }
+
+    #[test]
+    fn typical_phone_and_screen_videos_play_without_a_preview_copy() {
+        let mut reel = info(Hdr::None, "yuv420p", 8);
+        reel.width = 1080;
+        reel.height = 1920;
+        reel.fps = 30.0;
+        reel.audio_codec = Some("aac".into());
+        assert!(plays_directly(&reel, Path::new("reel.MP4")));
+        assert!(plays_directly(&reel, Path::new("reel.mov")));
+        assert!(!plays_directly(&reel, Path::new("reel.mkv")));
+
+        let iphone = MediaInfo {
+            video_codec: "hevc".into(),
+            ..reel.clone()
+        };
+        assert!(!plays_directly(&iphone, Path::new("reel.mov")));
+        let four_k = MediaInfo {
+            width: 2160,
+            height: 3840,
+            ..reel.clone()
+        };
+        assert!(!plays_directly(&four_k, Path::new("reel.mp4")));
+        let hdr = info(Hdr::Pq, "yuv420p10le", 10);
+        assert!(!plays_directly(&hdr, Path::new("reel.mp4")));
     }
 
     #[test]

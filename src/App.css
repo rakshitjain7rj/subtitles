@@ -556,6 +556,19 @@ input[type="range"] {
   font-kerning: normal;
 }
 
+.preview-pending {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+}
+
 .preview-error {
   position: absolute;
   inset: auto 0 0 0;
@@ -853,4 +866,15 @@ input[type="range"] {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.measuring {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.measuring .progress {
+  flex: none;
 }

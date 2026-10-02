@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
-import { api, errorMessage, onProgress } from "../lib/api";
+import { api, errorMessage } from "../lib/api";
 import { ago, clock } from "../lib/format";
 import { hasTranslatorKey, type ProjectSummary, type ProjectView, type Status } from "../lib/types";
 
@@ -17,13 +17,14 @@ const STAGE_LABEL: Record<ProjectSummary["stage"], string> = {
 interface Props {
   status: Status | null;
   statusError: string | null;
-  onOpen: (view: ProjectView) => void;
+  /** `fresh` when the video was just added, so captioning can start at once. */
+  onOpen: (view: ProjectView, fresh?: boolean) => void;
   onOpenSettings: () => void;
 }
 
 export function Home({ status, statusError, onOpen, onOpenSettings }: Props) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
-  const [importing, setImporting] = useState<{ name: string; fraction: number | null } | null>(null);
+  const [importing, setImporting] = useState<{ name: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -42,9 +43,9 @@ export function Home({ status, statusError, onOpen, onOpenSettings }: Props) {
   const importVideo = useCallback(
     async (path: string) => {
       setError(null);
-      setImporting({ name: path.split(/[\\/]/).pop() ?? path, fraction: null });
+      setImporting({ name: path.split(/[\\/]/).pop() ?? path });
       try {
-        onOpen(await api.importVideo(path));
+        onOpen(await api.importVideo(path), true);
       } catch (e) {
         setError(errorMessage(e));
       } finally {
@@ -53,13 +54,6 @@ export function Home({ status, statusError, onOpen, onOpenSettings }: Props) {
     },
     [onOpen],
   );
-
-  useEffect(() => {
-    const unlisten = onProgress((p) => {
-      if (p.stage === "preview") setImporting((cur) => (cur ? { ...cur, fraction: p.fraction } : cur));
-    });
-    return () => void unlisten.then((f) => f());
-  }, []);
 
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
@@ -134,8 +128,8 @@ export function Home({ status, statusError, onOpen, onOpenSettings }: Props) {
       <button className={`dropzone${dragging ? " dragging" : ""}`} onClick={choose} disabled={importing !== null}>
         {importing ? (
           <>
-            <strong>Preparing {importing.name}</strong>
-            <Progress fraction={importing.fraction} />
+            <strong>Opening {importing.name}</strong>
+            <Progress fraction={null} />
           </>
         ) : (
           <>
