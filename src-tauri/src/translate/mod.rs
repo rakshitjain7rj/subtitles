@@ -68,6 +68,7 @@ pub enum Engine {
 }
 
 /// A provider's answer for one chunk.
+#[derive(Debug)]
 pub struct Reply {
     pub phrases: Vec<Phrase>,
     /// The model that answered, e.g. "Gemini 3.8 Flash". A provider may fall

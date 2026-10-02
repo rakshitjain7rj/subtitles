@@ -1,26 +1,36 @@
 //! Google Gemini, through `generateContent`. All the models used here are on
 //! Google's free tier, where Google may use requests to improve its products.
-//! Free-tier models are often briefly overloaded, so busy replies are retried
-//! and then handed to the next model.
+//! Free-tier models are often overloaded, and a busy reply can take minutes
+//! to arrive, so a busy model hands over to the next one at once and a slow
+//! one gets the next one started alongside it. Every model is asked with the
+//! same full-quality request; only who answers first changes.
 
+use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::task::JoinSet;
 
 use serde_json::{json, Value};
 
 use super::{error_message, parse_captions_json, Reply, Translator, SYSTEM_PROMPT};
 use crate::captions::Phrase;
-use crate::error::{msg, Result};
+use crate::error::{msg, AppError, Result};
 
 /// Tried in order: (model code, name shown to the user). All are on the free
 /// tier; the older ones are usually less crowded when the newest is busy.
-const MODELS: [(&str, &str); 4] = [
+const MODELS: [(&str, &str); 3] = [
     ("gemini-3.8-flash", "Gemini 3.8 Flash"),
     ("gemini-3.7-flash", "Gemini 3.7 Flash"),
     ("gemini-3.5-flash", "Gemini 3.5 Flash"),
-    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
 ];
-/// Waits before each retry of a busy model, before moving to the next one.
-const RETRY_DELAYS: [Duration; 1] = [Duration::from_secs(4)];
+/// A model that hasn't answered by now gets the next one started alongside
+/// it. A normal answer takes 20–30 s, as the model thinks first.
+const HEDGE_AFTER: Duration = Duration::from_secs(45);
+/// When every model was busy, the whole list is tried this many times in all,
+/// this far apart.
+const ROUNDS: usize = 2;
+const ROUND_GAP: Duration = Duration::from_secs(4);
 /// Gemini counts its thinking against this limit too, so it is set well
 /// above the size of the captions themselves.
 const MAX_OUTPUT_TOKENS: u32 = 32768;
@@ -42,20 +52,110 @@ fn endpoint(model: &str) -> String {
 /// What to do after an unsuccessful HTTP status.
 #[derive(Debug, PartialEq)]
 enum OnError {
-    /// Overloaded or a server hiccup: wait and ask the same model again.
-    Retry,
-    /// This model's free-tier quota is used up (another model has its own),
-    /// or the model has been retired.
+    /// Overloaded, out of free-tier quota (each model has its own) or retired:
+    /// ask the next model.
     NextModel,
-    /// Retrying won't help (bad key, bad request).
+    /// No model will do better (bad key, bad request).
     Stop,
 }
 
 fn on_error(status: u16) -> OnError {
     match status {
-        500 | 502 | 503 | 504 => OnError::Retry,
-        429 | 404 => OnError::NextModel,
+        500 | 502 | 503 | 504 | 429 | 404 => OnError::NextModel,
         _ => OnError::Stop,
+    }
+}
+
+/// How one model's attempt ended.
+enum Attempt {
+    Answered(Reply),
+    /// Try another model. `quiet` errors (a retired model) don't replace a
+    /// more useful earlier one in the final message.
+    Next { error: AppError, quiet: bool },
+    Stop(AppError),
+}
+
+/// Asks `count` models through `attempt`, in order. A model that fails hands
+/// over to the next at once; one still working after `hedge_after` gets the
+/// next started alongside it. The first answer wins and the rest are
+/// cancelled. If every model fails, the list is tried again `rounds - 1`
+/// more times, `round_gap` apart.
+async fn race<F, Fut>(count: usize, hedge_after: Duration, rounds: usize, round_gap: Duration, attempt: F) -> Result<Reply>
+where
+    F: Fn(usize) -> Fut,
+    Fut: Future<Output = Attempt> + Send + 'static,
+{
+    let mut last_error: Option<AppError> = None;
+    for round in 0..rounds {
+        if round > 0 {
+            tokio::time::sleep(round_gap).await;
+        }
+        let mut running = JoinSet::new();
+        running.spawn(attempt(0));
+        let mut next = 1;
+        loop {
+            tokio::select! {
+                joined = running.join_next() => {
+                    match joined {
+                        Some(Ok(Attempt::Answered(reply))) => return Ok(reply),
+                        Some(Ok(Attempt::Stop(error))) => return Err(error),
+                        Some(Ok(Attempt::Next { error, quiet })) => {
+                            if !quiet || last_error.is_none() {
+                                last_error = Some(error);
+                            }
+                        }
+                        Some(Err(e)) => last_error = Some(msg(format!("Translation task failed: {e}"))),
+                        None => {}
+                    }
+                    if running.is_empty() {
+                        if next == count {
+                            break;
+                        }
+                        running.spawn(attempt(next));
+                        next += 1;
+                    }
+                }
+                _ = tokio::time::sleep(hedge_after), if next < count => {
+                    running.spawn(attempt(next));
+                    next += 1;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| msg("Translation failed.")))
+}
+
+async fn ask_model(client: reqwest::Client, key: Arc<str>, body: Arc<Value>, index: usize) -> Attempt {
+    let (model, label) = MODELS[index];
+    let sent = client
+        .post(endpoint(model))
+        // In a header rather than `?key=`, so it never lands in a URL or log.
+        .header("x-goog-api-key", &*key)
+        .json(&*body)
+        .send()
+        .await;
+    let resp = match sent {
+        Ok(resp) => resp,
+        Err(e) => return Attempt::Stop(e.into()),
+    };
+    let status = resp.status();
+    let text = match resp.text().await {
+        Ok(text) => text,
+        Err(e) => return Attempt::Stop(e.into()),
+    };
+    if status.is_success() {
+        return match parse_response(&text) {
+            Ok(phrases) => Attempt::Answered(Reply { phrases, model: label }),
+            Err(e) => Attempt::Stop(e),
+        };
+    }
+    let error = failure(status, &text);
+    match on_error(status.as_u16()) {
+        OnError::NextModel => Attempt::Next {
+            error,
+            quiet: status.as_u16() == 404,
+        },
+        OnError::Stop => Attempt::Stop(error),
     }
 }
 
@@ -75,41 +175,12 @@ fn failure(status: reqwest::StatusCode, body: &str) -> crate::error::AppError {
 impl Translator for Gemini {
     async fn request(&self, user: &str) -> Result<Reply> {
         let client = reqwest::Client::builder().timeout(Duration::from_secs(600)).build()?;
-        let body = request_body(user);
-        let mut last_error = None;
-        'models: for (model, label) in MODELS {
-            for attempt in 0..=RETRY_DELAYS.len() {
-                if attempt > 0 {
-                    tokio::time::sleep(RETRY_DELAYS[attempt - 1]).await;
-                }
-                let resp = client
-                    .post(endpoint(model))
-                    // In a header rather than `?key=`, so it never lands in a URL or log.
-                    .header("x-goog-api-key", &self.api_key)
-                    .json(&body)
-                    .send()
-                    .await?;
-                let status = resp.status();
-                let text = resp.text().await?;
-                if status.is_success() {
-                    return Ok(Reply {
-                        phrases: parse_response(&text)?,
-                        model: label,
-                    });
-                }
-                let action = on_error(status.as_u16());
-                // A retired fallback model shouldn't hide why the others failed.
-                if status.as_u16() != 404 || last_error.is_none() {
-                    last_error = Some(failure(status, &text));
-                }
-                match action {
-                    OnError::Retry => continue,
-                    OnError::NextModel => continue 'models,
-                    OnError::Stop => break 'models,
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| msg("Translation failed.")))
+        let key: Arc<str> = self.api_key.as_str().into();
+        let body = Arc::new(request_body(user));
+        race(MODELS.len(), HEDGE_AFTER, ROUNDS, ROUND_GAP, |i| {
+            ask_model(client.clone(), key.clone(), body.clone(), i)
+        })
+        .await
     }
 }
 
@@ -227,9 +298,9 @@ mod tests {
     }
 
     #[test]
-    fn busy_models_are_retried_and_exhausted_quotas_skipped() {
-        assert_eq!(on_error(503), OnError::Retry);
-        assert_eq!(on_error(500), OnError::Retry);
+    fn busy_and_exhausted_models_hand_over() {
+        assert_eq!(on_error(503), OnError::NextModel);
+        assert_eq!(on_error(500), OnError::NextModel);
         assert_eq!(on_error(429), OnError::NextModel);
         assert_eq!(on_error(404), OnError::NextModel);
         assert_eq!(on_error(400), OnError::Stop);
@@ -238,5 +309,71 @@ mod tests {
         let text = failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, busy).to_string();
         assert!(text.contains("busy right now") && text.ends_with("experiencing high demand."));
         assert!(!text.contains('{'));
+    }
+
+    /// A scripted model: answers or fails after `ms` milliseconds.
+    fn scripted(script: &'static [(u64, &'static str)]) -> impl Fn(usize) -> std::pin::Pin<Box<dyn Future<Output = Attempt> + Send>> {
+        move |i| {
+            let (ms, outcome) = script[i];
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                match outcome {
+                    "ok" => Attempt::Answered(Reply {
+                        phrases: Vec::new(),
+                        model: MODELS[i].1,
+                    }),
+                    "busy" => Attempt::Next {
+                        error: msg(format!("busy {i}")),
+                        quiet: false,
+                    },
+                    "gone" => Attempt::Next {
+                        error: msg(format!("gone {i}")),
+                        quiet: true,
+                    },
+                    _ => Attempt::Stop(msg(format!("stop {i}"))),
+                }
+            })
+        }
+    }
+
+    async fn run(script: &'static [(u64, &'static str)]) -> (Result<Reply>, Duration) {
+        let started = std::time::Instant::now();
+        let hedge = Duration::from_millis(200);
+        let gap = Duration::from_millis(10);
+        let result = race(script.len(), hedge, 2, gap, scripted(script)).await;
+        (result, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_busy_model_hands_over_at_once() {
+        let (result, took) = run(&[(20, "busy"), (20, "ok"), (20, "ok")]).await;
+        assert_eq!(result.unwrap().model, "Gemini 3.7 Flash");
+        assert!(took < Duration::from_millis(150), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_slow_model_gets_the_next_one_started_alongside() {
+        let (result, took) = run(&[(2_000, "ok"), (30, "ok"), (30, "ok")]).await;
+        assert_eq!(result.unwrap().model, "Gemini 3.7 Flash");
+        assert!(took < Duration::from_millis(600), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_slow_model_still_wins_if_it_answers_first() {
+        let (result, _) = run(&[(300, "ok"), (2_000, "ok"), (2_000, "ok")]).await;
+        assert_eq!(result.unwrap().model, "Gemini 3.8 Flash");
+    }
+
+    #[tokio::test]
+    async fn all_busy_tries_the_list_again_then_reports_the_useful_error() {
+        let (result, _) = run(&[(5, "busy"), (5, "busy"), (5, "gone")]).await;
+        assert_eq!(result.unwrap_err().to_string(), "busy 1");
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_stops_everything() {
+        let (result, took) = run(&[(10, "stop"), (10, "ok"), (10, "ok")]).await;
+        assert_eq!(result.unwrap_err().to_string(), "stop 0");
+        assert!(took < Duration::from_millis(100));
     }
 }
