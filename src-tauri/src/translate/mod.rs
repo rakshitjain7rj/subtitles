@@ -6,7 +6,7 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 
-use crate::captions::{repair_phrases, Phrase};
+use crate::captions::{repair_phrases, split_long_phrases, Phrase};
 use crate::error::{msg, Result};
 use crate::transcribe::Word;
 
@@ -37,8 +37,9 @@ their own video. Keep names, brands and numbers accurate. Keep the tone as it is
 or embellish.
 
 2. Break each translated sentence into caption phrases of 2 to 5 words, splitting where a reader would \
-naturally pause so each phrase reads well on its own. A single word is fine for an interjection or for \
-emphasis.
+naturally pause so each phrase reads well on its own. Never put more than 5 words in one phrase: count \
+them, and split a longer clause in two (\"He was basically the founder\" / \"of the Sikh Empire\"). A single \
+word is fine for an interjection or for emphasis.
 
 3. Give each phrase the run of spoken words during which it should be on screen, as `first` and `last` \
 word numbers (inclusive). Hindi and English put words in a different order, so don't try to match words \
@@ -112,7 +113,7 @@ pub async fn translate(
     for (i, (lo, hi)) in chunks.iter().copied().enumerate() {
         on_progress(i as f64 / chunks.len() as f64);
         let reply = translator.request(&user_message(words, lo, hi)).await?;
-        out.phrases.extend(repair_phrases(reply.phrases, lo, hi));
+        out.phrases.extend(split_long_phrases(repair_phrases(reply.phrases, lo, hi)));
         if !out.models.contains(&reply.model) {
             out.models.push(reply.model);
         }
