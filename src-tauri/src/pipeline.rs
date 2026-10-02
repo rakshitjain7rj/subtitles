@@ -12,7 +12,7 @@ use crate::error::{msg, Result};
 use crate::ffmpeg::{run_capture, run_with_progress, Tools};
 use crate::keys::{self, Provider};
 use crate::probe::{probe, MediaInfo};
-use crate::project::{now, ExportRecord, Project, Store, AUDIO_FILE, PREVIEW_FILE, PREVIEW_SOURCE_FILE};
+use crate::project::{now, ExportRecord, Project, Store, AUDIO_FILE, PREVIEW_FILE, PREVIEW_SOURCE_FILE, THUMB_FILE};
 use crate::quality::{self, Measurement, CEILING_LOG, VMAF_LOG};
 use crate::transcribe::scribe::Scribe;
 use crate::transcribe::Transcriber;
@@ -62,7 +62,24 @@ pub async fn import(tools: &Tools, store: &Store, source: &Path) -> Result<Proje
     let info = probe(tools, source).await?;
     let mut project = Project::new(source, info);
     store.save(&mut project)?;
+    ensure_thumbnail(tools, store, &project).await;
     Ok(project)
+}
+
+/// Makes the project list's thumbnail if it is missing. Best effort: a video
+/// without one just shows a placeholder.
+pub async fn ensure_thumbnail(tools: &Tools, store: &Store, project: &Project) {
+    let Ok(dir) = store.dir(&project.id) else { return };
+    let thumb = dir.join(THUMB_FILE);
+    if thumb.is_file() {
+        return;
+    }
+    let Ok(source) = source_of(project) else { return };
+    let partial = dir.join("thumb.partial.jpg");
+    let args = encode::thumbnail_args(&project.info, &source, &partial);
+    if run_capture(&tools.ffmpeg, &args, None).await.is_ok() {
+        let _ = tokio::fs::rename(&partial, &thumb).await;
+    }
 }
 
 /// Whether the editor has something to play: a preview copy, or the source
@@ -84,10 +101,11 @@ pub enum PreviewKind {
 /// Gets the editor's preview ready. Runs alongside transcription, so a new
 /// video's captions don't wait for it.
 pub async fn build_preview(tools: &Tools, store: &Store, id: &str, progress: Progress<'_>) -> Result<PreviewKind> {
+    let project = store.load(id)?;
+    ensure_thumbnail(tools, store, &project).await;
     if preview_ready(store, id) {
         return Ok(PreviewKind::AlreadyThere);
     }
-    let project = store.load(id)?;
     let source = source_of(&project)?;
     let dir = store.dir(id)?;
     if encode::plays_directly(&project.info, &source) {
@@ -488,6 +506,7 @@ mod tests {
         let store = Store::new(root.join("projects"));
         let quiet = |_: Stage, _: Option<f64>| {};
         let mut project = import(&tools, &store, &source).await.expect("import");
+        assert!(store.dir(&project.id).unwrap().join(THUMB_FILE).is_file());
         assert!(!preview_ready(&store, &project.id));
         let kind = build_preview(&tools, &store, &project.id, &quiet).await.expect("preview");
         assert!(preview_ready(&store, &project.id));

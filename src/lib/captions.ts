@@ -1,7 +1,7 @@
 // Pure editing operations on the caption list. Each returns a new array and
 // leaves its input untouched, so the editor can keep an undo history.
 
-import type { Caption } from "./types";
+import type { Caption, Word } from "./types";
 
 /** Shortest a caption may be made by nudging or splitting, in seconds. */
 export const MIN_DURATION = 0.1;
@@ -113,4 +113,38 @@ export function insertAt(captions: Caption[], t: number, duration: number): { ca
   if (end - start < MIN_DURATION) return null;
   const added: Caption = { id: newId(), start, end, english: "", hindi: "" };
   return { captions: [...captions.slice(0, at), added, ...captions.slice(at)], index: at };
+}
+
+/**
+ * Moves one edge of a caption to time `t`, as when dragging it on the
+ * timeline. Like `nudge`, an edge pushed into a neighbour moves the
+ * neighbour's edge too (captions usually touch), down to `MIN_DURATION`; the
+ * clip's ends are limits.
+ */
+export function retime(captions: Caption[], i: number, edge: "start" | "end", t: number, duration: number): Caption[] {
+  const c = captions[i];
+  if (!c) return captions;
+  const target = Math.min(Math.max(t, 0), duration);
+  const delta = target - c[edge];
+  if (Math.abs(delta) < 0.0005) return captions;
+  const out = nudge(captions, i, edge, delta);
+  const moved = out[i];
+  if (moved.end > duration) moved.end = Math.max(round(duration), moved.start + MIN_DURATION);
+  return out;
+}
+
+/** The spoken-word boundary nearest `t` within `tolerance` seconds, else `t`. */
+export function snapToWords(t: number, words: Word[] | null, tolerance: number): number {
+  let best = t;
+  let bestDistance = tolerance;
+  for (const w of words ?? []) {
+    for (const edge of [w.start, w.end]) {
+      const d = Math.abs(edge - t);
+      if (d < bestDistance) {
+        best = edge;
+        bestDistance = d;
+      }
+    }
+  }
+  return best;
 }

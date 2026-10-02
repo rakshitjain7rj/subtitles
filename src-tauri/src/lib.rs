@@ -178,9 +178,29 @@ async fn delete_api_key(provider: Provider) -> Result<()> {
     keys::delete(provider).await
 }
 
+#[derive(Serialize)]
+struct ProjectListItem {
+    #[serde(flatten)]
+    summary: ProjectSummary,
+    /// None until the thumbnail has been made.
+    thumb_url: Option<String>,
+}
+
 #[tauri::command]
-async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>> {
-    Ok(state.store.list())
+async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectListItem>> {
+    Ok(state
+        .store
+        .list()
+        .into_iter()
+        .map(|summary| {
+            let has_thumb = state
+                .store
+                .dir(&summary.id)
+                .is_ok_and(|d| d.join(project::THUMB_FILE).is_file());
+            let thumb_url = has_thumb.then(|| state.preview.thumb_url(&summary.id, summary.updated_at));
+            ProjectListItem { summary, thumb_url }
+        })
+        .collect())
 }
 
 #[tauri::command]

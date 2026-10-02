@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use crate::error::{msg, Result};
-use crate::project::{valid_id, PREVIEW_FILE, PREVIEW_SOURCE_FILE};
+use crate::project::{valid_id, PREVIEW_FILE, PREVIEW_SOURCE_FILE, THUMB_FILE};
 
 pub struct PreviewServer {
     port: u16,
@@ -40,10 +40,15 @@ impl PreviewServer {
 
     /// `version` changes when the preview is regenerated, to defeat caching.
     pub fn url(&self, project_id: &str, version: u64) -> String {
-        format!(
-            "http://127.0.0.1:{}/{}/{}/{PREVIEW_FILE}?v={version}",
-            self.port, self.token, project_id
-        )
+        self.file_url(project_id, PREVIEW_FILE, version)
+    }
+
+    pub fn thumb_url(&self, project_id: &str, version: u64) -> String {
+        self.file_url(project_id, THUMB_FILE, version)
+    }
+
+    fn file_url(&self, project_id: &str, file: &str, version: u64) -> String {
+        format!("http://127.0.0.1:{}/{}/{project_id}/{file}?v={version}", self.port, self.token)
     }
 }
 
@@ -73,7 +78,8 @@ fn resolve(url: &str, root: &std::path::Path, token: &str) -> Option<PathBuf> {
     let path = url.split('?').next()?;
     let mut parts = path.trim_start_matches('/').split('/');
     let (tok, id, file) = (parts.next()?, parts.next()?, parts.next()?);
-    (parts.next().is_none() && tok == token && valid_id(id) && file == PREVIEW_FILE).then(|| root.join(id).join(file))
+    let servable = file == PREVIEW_FILE || file == THUMB_FILE;
+    (parts.next().is_none() && tok == token && valid_id(id) && servable).then(|| root.join(id).join(file))
 }
 
 /// The preview copy, or the source it stands for when the source is played
@@ -92,6 +98,7 @@ fn playable(preview: PathBuf) -> PathBuf {
 fn content_type(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("mov") => "video/quicktime",
+        Some("jpg") => "image/jpeg",
         _ => "video/mp4",
     }
 }
@@ -219,6 +226,10 @@ mod tests {
         );
         assert_eq!(resolve(&format!("/bad/{id}/preview.mp4"), root, "tok"), None);
         assert_eq!(resolve(&format!("/tok/{id}/project.json"), root, "tok"), None);
+        assert_eq!(
+            resolve(&format!("/tok/{id}/thumb.jpg"), root, "tok"),
+            Some(root.join(id).join("thumb.jpg"))
+        );
         assert_eq!(resolve("/tok/../preview.mp4", root, "tok"), None);
     }
 }

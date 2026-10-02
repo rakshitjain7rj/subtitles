@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeIndex, insertAt, mergeWithNext, nudge, remove, split } from "./captions";
+import { activeIndex, insertAt, mergeWithNext, nudge, remove, retime, snapToWords, split } from "./captions";
 import type { Caption } from "./types";
 
 const cap = (id: string, start: number, end: number, english: string, hindi = ""): Caption => ({ id, start, end, english, hindi });
@@ -82,5 +82,52 @@ describe("merge, remove, insert", () => {
     expect(insertAt(three(), 0.5, 10)).toBeNull();
     expect(insertAt(three(), 9.95, 10)).toBeNull();
     expect(insertAt(three(), 5, 10)?.captions[3]).toMatchObject({ start: 5, end: 6 });
+  });
+});
+
+describe("retime", () => {
+  const caps = [cap("a", 0, 1, "a"), cap("b", 2, 3, "b"), cap("c", 4, 5, "c")];
+
+  it("moves an edge freely within the gap", () => {
+    const out = retime(caps, 1, "start", 1.5, 10);
+    expect(out[1].start).toBe(1.5);
+    expect(out[0]).toEqual(caps[0]);
+  });
+
+  it("pushes a touching neighbour's edge, keeping it at least the minimum length", () => {
+    const touching = [cap("a", 0, 1, "a"), cap("b", 1, 2, "b"), cap("c", 2, 3, "c")];
+    const longer = retime(touching, 1, "end", 2.5, 10);
+    expect(longer[1].end).toBe(2.5);
+    expect(longer[2].start).toBe(2.5);
+    const capped = retime(touching, 1, "end", 9, 10);
+    expect(capped[1].end).toBeCloseTo(2.9);
+    expect(capped[2].start).toBeCloseTo(2.9);
+    expect(retime(caps, 2, "end", 99, 6)[2].end).toBe(6);
+  });
+
+  it("keeps a minimum length", () => {
+    expect(retime(caps, 1, "start", 3.5, 10)[1].start).toBeCloseTo(2.9);
+    expect(retime(caps, 1, "end", 0, 10)[1].end).toBeCloseTo(2.1);
+  });
+
+  it("returns the same list when nothing changes", () => {
+    expect(retime(caps, 1, "start", 2, 10)).toBe(caps);
+  });
+});
+
+describe("snapToWords", () => {
+  const words = [
+    { text: "आज", start: 1.0, end: 1.4 },
+    { text: "हम", start: 1.6, end: 2.0 },
+  ];
+
+  it("snaps to the nearest word edge within the tolerance", () => {
+    expect(snapToWords(1.45, words, 0.1)).toBe(1.4);
+    expect(snapToWords(1.58, words, 0.1)).toBe(1.6);
+  });
+
+  it("leaves times away from any word alone", () => {
+    expect(snapToWords(3, words, 0.1)).toBe(3);
+    expect(snapToWords(1.2, null, 0.5)).toBe(1.2);
   });
 });

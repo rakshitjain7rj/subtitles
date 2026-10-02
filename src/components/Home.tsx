@@ -146,14 +146,26 @@ export function Home({ status, statusError, onOpen, onOpenSettings }: Props) {
             {projects.map((p) => (
               <li key={p.id}>
                 <button className="project" onClick={() => openProject(p.id)}>
-                  <span className="project-name">{p.name}</span>
-                  <span className="muted">
-                    {clock(p.duration, 0)} · {p.width}×{p.height} · {STAGE_LABEL[p.stage]}
-                    {p.source_missing && <span className="warn"> · original file missing</span>}
+                  <span className={`thumb${p.width < p.height ? " portrait" : ""}`}>
+                    {p.thumb_url ? <img src={p.thumb_url} alt="" loading="lazy" /> : <span aria-hidden>▶</span>}
+                  </span>
+                  <span className="project-text">
+                    <span className="project-name">{p.name}</span>
+                    <span className="muted small">
+                      {clock(p.duration, 0)} · {p.width < p.height ? "vertical" : "horizontal"} · {ago(p.updated_at)}
+                    </span>
+                    <span className="project-tags">
+                      <span className={`tag stage-${p.stage}`}>{STAGE_LABEL[p.stage]}</span>
+                      {p.source_missing && <span className="tag warn">Original file missing</span>}
+                    </span>
                   </span>
                 </button>
-                <span className="muted small">{ago(p.updated_at)}</span>
-                <button className="ghost small" onClick={() => removeProject(p)} aria-label={`Remove ${p.name}`}>
+                <button
+                  className="ghost small project-remove"
+                  onClick={() => removeProject(p)}
+                  aria-label={`Remove ${p.name}`}
+                  title="Remove from this list (the original video is not touched)"
+                >
                   Remove
                 </button>
               </li>

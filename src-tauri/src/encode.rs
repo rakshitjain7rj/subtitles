@@ -53,6 +53,18 @@ pub fn audio_args(src: &Path, out: &Path) -> Vec<String> {
     a
 }
 
+/// One small JPEG frame from early in the video, for the project list.
+pub fn thumbnail_args(info: &MediaInfo, src: &Path, out: &Path) -> Vec<String> {
+    let at = (info.duration / 2.0).min(1.0);
+    let mut a = strings(&["-y", "-ss"]);
+    a.push(format!("{at:.3}"));
+    a.push("-i".into());
+    a.push(path_arg(src));
+    a.extend(strings(&["-frames:v", "1", "-vf", "scale=-2:240", "-q:v", "4"]));
+    a.push(path_arg(out));
+    a
+}
+
 /// Whether the webviews can play `src` as it is, so no preview copy has to be
 /// made: 8-bit SDR H.264 up to 1080p60 with AAC or MP3 audio, in MP4 or MOV.
 pub fn plays_directly(info: &MediaInfo, src: &Path) -> bool {

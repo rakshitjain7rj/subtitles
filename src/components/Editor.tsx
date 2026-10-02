@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ask, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage, onExportMeasured, onProgress } from "../lib/api";
-import { insertAt, mergeWithNext, nudge, remove, setText, split } from "../lib/captions";
+import { insertAt, mergeWithNext, nudge, remove, retime, setText, split } from "../lib/captions";
 import { describeVideo, estimateCostUsd, usd } from "../lib/format";
 import { STYLE_LIMITS } from "../lib/style";
 import { captionFontReady, wrapAll } from "../lib/wrap";
@@ -9,6 +9,7 @@ import { hasTranslatorKey, type Caption, type ProjectView, type Stage, type Stat
 import { CaptionList, type CaptionAction } from "./CaptionList";
 import { ExportReport } from "./ExportReport";
 import { Progress } from "./Home";
+import { Timeline } from "./Timeline";
 import { VideoPreview, type PreviewHandle } from "./VideoPreview";
 
 const STAGE_LABEL: Record<Stage, string> = {
@@ -19,6 +20,19 @@ const STAGE_LABEL: Record<Stage, string> = {
   encode: "Encoding video",
   verify: "Measuring quality against the original",
 };
+
+/** Caption heights to pick from; the slider fine-tunes. `y` is % from the top. */
+const POSITIONS = [
+  { label: "Top", y: 18 },
+  { label: "Middle", y: 50 },
+  { label: "Reels-safe", y: 72, hint: "Low, but above Instagram and YouTube's buttons" },
+  { label: "Bottom", y: 86 },
+];
+const SIZES = [
+  { label: "S", size: 5 },
+  { label: "M", size: 6.5 },
+  { label: "L", size: 8 },
+];
 
 const SAVE_DELAY_MS = 500;
 const UNDO_LIMIT = 100;
@@ -140,12 +154,36 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
     markDirty();
   }, [markDirty]);
 
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
   const select = useCallback((index: number) => {
     setSelected(index);
     const c = latest.current.captions[index];
     // Land just inside the caption so it is the one shown.
     if (c) preview.current?.seek(c.start + 0.001);
   }, []);
+
+  // Timeline drags: one undo step per drag, then live updates as it moves.
+  const beginRetime = useCallback(() => {
+    undoStack.current.push(latest.current.captions);
+    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+    typingIn.current = null;
+  }, []);
+
+  const retimeTo = useCallback(
+    (index: number, edge: "start" | "end", t: number) => {
+      const current = latest.current.captions;
+      const next = retime(current, index, edge, t, info.duration);
+      if (next === current) return;
+      setCaptions(next);
+      markDirty();
+    },
+    [info.duration, markDirty],
+  );
+
+  const getTime = useCallback(() => preview.current?.time() ?? 0, []);
+  const seekTo = useCallback((t: number) => preview.current?.seek(t), []);
 
   function addCaption() {
     const t = preview.current?.time() ?? 0;
@@ -173,11 +211,18 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
       } else if (e.key === " " && !typing && !(e.target instanceof HTMLButtonElement)) {
         e.preventDefault();
         preview.current?.toggle();
+      } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !typing) {
+        e.preventDefault();
+        const count = latest.current.captions.length;
+        if (count === 0) return;
+        const from = selectedRef.current;
+        const to = e.key === "ArrowDown" ? Math.min(from + 1, count - 1) : Math.max(from - 1, 0);
+        select(from === -1 ? 0 : to);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo]);
+  }, [undo, select]);
 
   // --- long-running steps -------------------------------------------------
 
@@ -314,6 +359,7 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
           <h1>{project.name}</h1>
           <span className="muted small">{describeVideo(info)}</span>
         </div>
+        <Steps hasCaptions={hasCaptions} exported={project.last_export !== null} />
         <span className={`muted small save-state ${saveState}`}>
           {saveState === "saved" ? (hasCaptions ? "Saved" : "") : saveState === "saving" ? "Saving…" : "Not saved"}
         </span>
@@ -359,29 +405,57 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
             onActiveChange={setPlaying}
           />
           <div className="style-controls">
-            <label>
-              <span>Position</span>
+            <div className="style-row">
+              <span className="style-label">Position</span>
+              <div className="segmented" role="group" aria-label="Caption position">
+                {POSITIONS.map((p) => (
+                  <button
+                    key={p.label}
+                    className={Math.abs(style.y_pct - p.y) < 0.75 ? "on" : ""}
+                    title={p.hint}
+                    onClick={() => changeStyle({ y_pct: p.y })}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="range"
+                aria-label="Fine-tune position"
                 min={STYLE_LIMITS.y[0]}
                 max={STYLE_LIMITS.y[1]}
                 step={0.5}
                 value={style.y_pct}
                 onChange={(e) => changeStyle({ y_pct: Number(e.target.value) })}
               />
-            </label>
-            <label>
-              <span>Size</span>
+            </div>
+            <div className="style-row">
+              <span className="style-label">Size</span>
+              <div className="segmented" role="group" aria-label="Caption size">
+                {SIZES.map((z) => (
+                  <button
+                    key={z.label}
+                    className={Math.abs(style.size_pct - z.size) < 0.2 ? "on" : ""}
+                    onClick={() => changeStyle({ size_pct: z.size })}
+                  >
+                    {z.label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="range"
+                aria-label="Fine-tune size"
                 min={STYLE_LIMITS.size[0]}
                 max={STYLE_LIMITS.size[1]}
                 step={0.25}
                 value={style.size_pct}
                 onChange={(e) => changeStyle({ size_pct: Number(e.target.value) })}
               />
-            </label>
+            </div>
           </div>
+          <p className="muted small shortcuts">
+            <kbd>Space</kbd> play/pause · <kbd>↑</kbd> <kbd>↓</kbd> previous/next caption · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo
+          </p>
           {info.hdr !== "none" && (
             <p className="muted small">
               HDR video: the export stays HDR (10-bit HEVC). This preview is a simplified SDR copy, so its colours are only
@@ -394,10 +468,13 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
           {hasCaptions ? (
             <>
               <div className="list-toolbar">
-                <span className="muted small">{captions.length} captions
-                  {project.translated_with ? ` · translated with ${project.translated_with}` : ""}
+                <span
+                  className="muted small list-count"
+                  title={project.translated_with ? `Translated with ${project.translated_with}` : undefined}
+                >
+                  {captions.length} captions
+                  {project.translated_with ? ` · ${project.translated_with}` : ""}
                 </span>
-                <span className="spacer" />
                 <button className="ghost small" onClick={undo} disabled={busy !== null} title="Ctrl+Z">
                   Undo
                 </button>
@@ -450,9 +527,42 @@ export function Editor({ initial, fresh, status, onBack, onOpenSettings }: Props
             </div>
           )}
         </section>
+        {hasCaptions && (
+          <Timeline
+            duration={info.duration}
+            captions={captions}
+            words={project.words}
+            selected={selected}
+            getTime={getTime}
+            onSeek={seekTo}
+            onSelect={select}
+            onDragStart={beginRetime}
+            onRetime={retimeTo}
+          />
+        )}
       </div>
 
       {showReport && project.last_export && <ExportReport record={project.last_export} measuring={measuring} onClose={() => setShowReport(false)} />}
     </div>
+  );
+}
+
+/** Where this video is in the three steps from video to captioned file. */
+function Steps({ hasCaptions, exported }: { hasCaptions: boolean; exported: boolean }) {
+  const steps = [
+    { label: "Captions", done: hasCaptions },
+    { label: "Review", done: exported },
+    { label: "Export", done: exported },
+  ];
+  const current = steps.findIndex((st) => !st.done);
+  return (
+    <ol className="steps" aria-label="Progress">
+      {steps.map((st, i) => (
+        <li key={st.label} className={st.done ? "done" : i === current ? "current" : ""}>
+          <span className="step-dot">{st.done ? "✓" : i + 1}</span>
+          <span className="step-label">{st.label}</span>
+        </li>
+      ))}
+    </ol>
   );
 }

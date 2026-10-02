@@ -113,6 +113,8 @@ export interface ProjectSummary {
   height: number;
   stage: "new" | "transcribed" | "captioned" | "exported";
   source_missing: boolean;
+  /** A frame from the video, once made. */
+  thumb_url: string | null;
 }
 
 export interface ToolCheck {
