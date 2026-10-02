@@ -1,5 +1,6 @@
 mod ass;
 mod captions;
+mod diag;
 mod encode;
 mod error;
 mod ffmpeg;
@@ -19,9 +20,11 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::ass::Style;
 use crate::captions::Caption;
+use crate::diag::Log;
 use crate::encode::Quality;
 use crate::error::{msg, Result};
 use crate::ffmpeg::Tools;
@@ -37,6 +40,7 @@ struct AppState {
     store: Store,
     settings: SettingsFile,
     preview: PreviewServer,
+    log: Log,
     /// Projects with a long-running step in flight.
     busy: Mutex<HashSet<String>>,
 }
@@ -147,8 +151,15 @@ async fn set_translator(state: State<'_, AppState>, engine: Engine) -> Result<()
 }
 
 #[tauri::command]
-async fn set_api_key(provider: Provider, key: String) -> Result<Option<String>> {
-    keys::check_and_set(provider, key).await
+async fn set_api_key(state: State<'_, AppState>, provider: Provider, key: String) -> Result<Option<String>> {
+    let result = keys::check_and_set(provider, key).await;
+    let outcome = match &result {
+        Ok(None) => "checked and saved".to_string(),
+        Ok(Some(note)) => note.clone(),
+        Err(e) => format!("not saved: {e}"),
+    };
+    state.log.line(format!("{} key: {outcome}", provider.label()));
+    result
 }
 
 #[tauri::command]
@@ -165,7 +176,10 @@ async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectSummary>
 async fn import_video(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<ProjectView> {
     let _guard = state.begin(&format!("import:{path}"))?;
     let progress = progress_emitter(app, None);
-    let project = pipeline::import(&state.tools, &state.store, &PathBuf::from(path), &progress).await?;
+    let path = PathBuf::from(path);
+    let work = pipeline::import(&state.tools, &state.store, &path, &progress);
+    let project = state.log.step("import", work).await?;
+    state.log.line(format!("  video: {}", diag::describe_media(&project.info)));
     Ok(view(&state, project))
 }
 
@@ -198,7 +212,14 @@ async fn transcribe_project(
 ) -> Result<ProjectView> {
     let _guard = state.begin(&id)?;
     let progress = progress_emitter(app, Some(id.clone()));
-    let project = pipeline::transcribe(&state.tools, &state.store, &id, force, &progress).await?;
+    let work = pipeline::transcribe(&state.tools, &state.store, &id, force, &progress);
+    let project = state.log.step("transcribe", work).await?;
+    state.log.line(format!(
+        "  {} words, language {:?}, {:.1}s of video",
+        project.words.as_ref().map_or(0, Vec::len),
+        project.language,
+        project.info.duration
+    ));
     Ok(view(&state, project))
 }
 
@@ -207,7 +228,13 @@ async fn translate_project(app: AppHandle, state: State<'_, AppState>, id: Strin
     let _guard = state.begin(&id)?;
     let progress = progress_emitter(app, Some(id.clone()));
     let engine = state.settings.load().translator;
-    let project = pipeline::translate(&state.store, &id, engine, &progress).await?;
+    let work = pipeline::translate(&state.store, &id, engine, &progress);
+    let project = state.log.step(&format!("translate ({engine:?})"), work).await?;
+    state.log.line(format!(
+        "  {} captions by {}",
+        project.captions.len(),
+        project.translated_with.as_deref().unwrap_or("?")
+    ));
     Ok(view(&state, project))
 }
 
@@ -228,17 +255,50 @@ async fn export_project(
     let _guard = state.begin(&id)?;
     let progress = progress_emitter(app, Some(id.clone()));
     let quality = state.settings.load().export_quality;
-    let project = pipeline::export(
+    let out_path = PathBuf::from(out_path);
+    let work = pipeline::export(
         &state.tools,
         &state.store,
         &id,
-        &PathBuf::from(out_path),
+        &out_path,
         &wrapped,
         quality,
         &progress,
-    )
-    .await?;
+    );
+    let project = state.log.step(&format!("export ({quality:?})"), work).await?;
+    if let Some(record) = &project.last_export {
+        state.log.line(format!("  {}", diag::describe_report(&record.report)));
+    }
     Ok(view(&state, project))
+}
+
+/// Copies a diagnostic report to the clipboard for a tester to send: app and
+/// system versions, settings, which keys are set (not the keys), and the log.
+#[tauri::command]
+async fn copy_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
+    let tools = pipeline::check_tools(&state.tools).await;
+    let has = |r: Result<Option<String>>| match r {
+        Ok(Some(_)) => "set",
+        Ok(None) => "missing",
+        Err(_) => "keychain error",
+    };
+    let report = format!(
+        "Subtitles {} on {} {}\nffmpeg: {} {}\nsettings: {:?}\nkeys: ElevenLabs {}, Gemini {}, Anthropic {}\nprojects: {}\n\n{}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        tools.version.as_deref().unwrap_or("not found"),
+        if tools.ok { "ok".to_string() } else { format!("missing {:?}", tools.missing) },
+        state.settings.load(),
+        has(keys::get(Provider::ElevenLabs).await),
+        has(keys::get(Provider::Gemini).await),
+        has(keys::get(Provider::Anthropic).await),
+        state.store.list().len(),
+        state.log.tail(),
+    );
+    app.clipboard()
+        .write_text(report)
+        .map_err(|e| msg(format!("Couldn't copy to the clipboard: {e}")))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -246,17 +306,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let projects = data.join("projects");
             std::fs::create_dir_all(&projects)?;
             let resources = app.path().resource_dir().ok();
+            let log = Log::new(data.join("log.txt"));
+            log.line(format!(
+                "started Subtitles {} on {} {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
             app.manage(AppState {
                 tools: Tools::locate(resources.as_deref()),
                 store: Store::new(projects.clone()),
                 settings: SettingsFile::new(data.join("settings.json")),
                 preview: PreviewServer::start(projects)?,
                 busy: Mutex::new(HashSet::new()),
+                log,
             });
             Ok(())
         })
@@ -275,6 +344,7 @@ pub fn run() {
             translate_project,
             default_export_path,
             export_project,
+            copy_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

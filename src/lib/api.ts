@@ -9,6 +9,8 @@ export const api = {
   /** Checks the key with its service and saves it; resolves to a note when it couldn't be checked. */
   setApiKey: (provider: Provider, key: string) => invoke<string | null>("set_api_key", { provider, key }),
   deleteApiKey: (provider: Provider) => invoke<void>("delete_api_key", { provider }),
+  /** Puts a diagnostic report (no keys or transcripts) on the clipboard. */
+  copyDiagnostics: () => invoke<void>("copy_diagnostics"),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   importVideo: (path: string) => invoke<ProjectView>("import_video", { path }),
   openProject: (id: string) => invoke<ProjectView>("open_project", { id }),

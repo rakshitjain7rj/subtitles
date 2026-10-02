@@ -77,6 +77,17 @@ export function Settings({ status, onChanged, onClose }: Props) {
   const current = status?.settings.translator ?? "gemini";
   const exportQuality = status?.settings.export_quality ?? "high";
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function copyLog() {
+    setError(null);
+    try {
+      await api.copyDiagnostics();
+      setCopied(true);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
 
   async function chooseQuality(quality: Quality) {
     setError(null);
@@ -163,6 +174,17 @@ export function Settings({ status, onChanged, onClose }: Props) {
                 </span>
               </label>
             ))}
+          </div>
+        </section>
+
+        <section className="key-row">
+          <h3>Something not working?</h3>
+          <p className="muted small">
+            Copy a log of what the app did, then paste it in a message to whoever gave you the app. It has your
+            computer and video details and any error messages, but no API keys, transcripts or captions.
+          </p>
+          <div>
+            <button onClick={() => void copyLog()}>{copied ? "Copied ✓" : "Copy log"}</button>
           </div>
         </section>
 
