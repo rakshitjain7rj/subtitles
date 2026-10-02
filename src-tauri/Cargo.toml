@@ -1,6 +1,6 @@
 [package]
 name = "subtitles"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hindi and Hinglish speech to burned-in English captions, with a measured lossless-looking encode"
 authors = ["Subtitles contributors"]
 license = "GPL-3.0-or-later"
