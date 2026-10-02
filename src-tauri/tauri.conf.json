@@ -39,6 +39,18 @@
     ],
     "license": "GPL-3.0-or-later",
     "category": "Video",
-    "shortDescription": "Hindi speech to burned-in English captions"
+    "shortDescription": "Hindi speech to burned-in English captions",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5RTY5MkRDRTIzM0QwQzkKUldUSjBEUGkzSkxtT1dYTVdiYXZiU091UFVTQjIvcTBBZzR6VEZLck51alBRVUJyWENmL2VmbWgK",
+      "endpoints": [
+        "https://github.com/rakshitjain7rj/subtitles/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

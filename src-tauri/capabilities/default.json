@@ -11,6 +11,8 @@
     "opener:allow-reveal-item-in-dir",
     "dialog:allow-open",
     "dialog:allow-save",
-    "dialog:allow-ask"
+    "dialog:allow-ask",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

@@ -85,6 +85,24 @@ bundled ffmpeg first. Push a tag such as `v0.1.0` to get a draft release.
 Because the installers are unsigned, Windows and macOS show a warning the
 first time the app is opened.
 
+### Releasing an update
+
+Installed apps check GitHub Releases on launch and offer to update
+themselves. To ship a new version:
+
+1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and
+   `src-tauri/tauri.conf.json` (they must match), and commit.
+2. `git tag v0.1.1 && git push --tags`. The workflow builds every platform
+   into a draft release.
+3. Try the draft's installers, then publish the release. Apps only see an
+   update once it is published.
+
+Updates are signed. The private key is the repository secret
+`TAURI_SIGNING_PRIVATE_KEY`; its public half is in `tauri.conf.json`. If the
+key is lost, installed apps can't be updated and everyone has to reinstall,
+so keep a backup of it. On Linux, only the AppImage updates itself; the
+`.deb` has to be reinstalled.
+
 ## Layout
 
 ```

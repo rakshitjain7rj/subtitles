@@ -5,6 +5,7 @@ import { Home } from "./components/Home";
 import { Editor } from "./components/Editor";
 import { Settings } from "./components/Settings";
 import { Setup, needsSetup } from "./components/Setup";
+import { UpdateBanner } from "./components/UpdateBanner";
 import "./App.css";
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <UpdateBanner />
       {status && !setupDismissed && !open && (needsSetup(status) || setupShownThisRun.current) ? (
         <Setup
           status={status}

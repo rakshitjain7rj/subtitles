@@ -1,8 +1,10 @@
 name: Release
 
 # Builds unsigned installers for Linux, Windows and macOS, each with its own
-# GPL ffmpeg inside. Pushing a tag like v0.1.0 attaches them to a draft
-# GitHub release; a manual run only uploads them as workflow artifacts.
+# GPL ffmpeg inside. Pushing a tag like v0.1.0 attaches them, plus the
+# signed update bundles and latest.json, to a draft GitHub release. Installed
+# apps only see the update once that release is published. A manual run only
+# uploads the installers as workflow artifacts.
 on:
   push:
     tags: ["v*"]
@@ -95,6 +97,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update bundles the installed apps download; the
+          # matching public key is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: Subtitles __VERSION__
