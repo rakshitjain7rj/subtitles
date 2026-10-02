@@ -6,7 +6,8 @@ export const api = {
   status: () => invoke<Status>("app_status"),
   setExportQuality: (quality: Quality) => invoke<void>("set_export_quality", { quality }),
   setTranslator: (engine: Engine) => invoke<void>("set_translator", { engine }),
-  setApiKey: (provider: Provider, key: string) => invoke<void>("set_api_key", { provider, key }),
+  /** Checks the key with its service and saves it; resolves to a note when it couldn't be checked. */
+  setApiKey: (provider: Provider, key: string) => invoke<string | null>("set_api_key", { provider, key }),
   deleteApiKey: (provider: Provider) => invoke<void>("delete_api_key", { provider }),
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   importVideo: (path: string) => invoke<ProjectView>("import_video", { path }),

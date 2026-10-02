@@ -801,3 +801,39 @@ input[type="range"] {
 .checks li.bad > span:first-child {
   color: var(--bad);
 }
+
+/* First-run setup */
+
+.setup header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.setup-step .key-input {
+  align-self: stretch;
+}
+
+.setup-step ol {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.setup-footer {
+  display: flex;
+  justify-content: flex-end;
+}

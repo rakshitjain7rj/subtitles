@@ -147,8 +147,8 @@ async fn set_translator(state: State<'_, AppState>, engine: Engine) -> Result<()
 }
 
 #[tauri::command]
-async fn set_api_key(provider: Provider, key: String) -> Result<()> {
-    keys::set(provider, key).await
+async fn set_api_key(provider: Provider, key: String) -> Result<Option<String>> {
+    keys::check_and_set(provider, key).await
 }
 
 #[tauri::command]

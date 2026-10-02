@@ -40,7 +40,7 @@ const TRANSLATORS: { engine: Engine; title: string; detail: string; provider: Pr
   },
   {
     engine: "claude",
-    title: "Claude Sonnet 5.5 (paid)",
+    title: "Claude Sonnet 5.5 (beta, paid)",
     detail: "Paid per use, roughly $0.04 per minute of video, from prepaid Anthropic credit. Not used for training.",
     provider: {
       id: "anthropic",
@@ -179,15 +179,43 @@ export function Settings({ status, onChanged, onClose }: Props) {
 }
 
 function KeyRow({ provider, saved, onChanged }: { provider: ProviderInfo; saved: boolean; onChanged: () => Promise<void> }) {
+  return (
+    <section className="key-row">
+      <div className="key-head">
+        <h3>{provider.name} API key</h3>
+        <span className={saved ? "tag ok" : "tag"}>{saved ? "Saved" : "Not set"}</span>
+      </div>
+      <p className="muted small">
+        {provider.use} Get a key at {provider.where}.
+      </p>
+      <KeyInput provider={provider.id} placeholder={provider.placeholder} saved={saved} onChanged={onChanged} />
+    </section>
+  );
+}
+
+/** Paste box for one key: checks it with the service, saves it, or removes it. */
+export function KeyInput({
+  provider,
+  placeholder,
+  saved,
+  onChanged,
+}: {
+  provider: Provider;
+  placeholder: string;
+  saved: boolean;
+  onChanged: () => Promise<void>;
+}) {
   const [value, setValue] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<string | null | void>) {
     setWorking(true);
     setError(null);
+    setNote(null);
     try {
-      await action();
+      setNote((await action()) ?? null);
       setValue("");
       await onChanged();
     } catch (e) {
@@ -198,33 +226,27 @@ function KeyRow({ provider, saved, onChanged }: { provider: ProviderInfo; saved:
   }
 
   return (
-    <section className="key-row">
-      <div className="key-head">
-        <h3>{provider.name} API key</h3>
-        <span className={saved ? "tag ok" : "tag"}>{saved ? "Saved" : "Not set"}</span>
-      </div>
-      <p className="muted small">
-        {provider.use} Get a key at {provider.where}.
-      </p>
+    <>
       <div className="key-input">
         <input
           type="password"
           value={value}
-          placeholder={saved ? "Paste a new key to replace it" : provider.placeholder}
+          placeholder={saved ? "Paste a new key to replace it" : placeholder}
           onChange={(e) => setValue(e.target.value)}
           autoComplete="off"
           spellCheck={false}
         />
-        <button disabled={working || value.trim() === ""} onClick={() => run(() => api.setApiKey(provider.id, value))}>
-          Save
+        <button disabled={working || value.trim() === ""} onClick={() => run(() => api.setApiKey(provider, value))}>
+          {working ? "Checking…" : "Save"}
         </button>
         {saved && (
-          <button className="ghost" disabled={working} onClick={() => run(() => api.deleteApiKey(provider.id))}>
+          <button className="ghost" disabled={working} onClick={() => run(() => api.deleteApiKey(provider))}>
             Remove
           </button>
         )}
       </div>
       {error && <p className="error-text small">{error}</p>}
-    </section>
+      {note && <p className="muted small">{note}</p>}
+    </>
   );
 }
