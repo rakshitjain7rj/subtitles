@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "bin/ffmpeg.exe": "bin/ffmpeg.exe",
+      "bin/ffprobe.exe": "bin/ffprobe.exe",
+      "bin/FFMPEG-LICENSE.txt": "bin/FFMPEG-LICENSE.txt"
+    }
+  }
+}

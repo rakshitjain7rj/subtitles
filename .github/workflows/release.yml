@@ -1,0 +1,115 @@
+name: Release
+
+# Builds unsigned installers for Linux, Windows and macOS, each with its own
+# GPL ffmpeg inside. Pushing a tag like v0.1.0 attaches them to a draft
+# GitHub release; a manual run only uploads them as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+            ffmpeg: linux-x64
+            config: src-tauri/bundle/linux.json
+            native: true
+          - name: Windows x64
+            os: windows-latest
+            ffmpeg: windows-x64
+            config: src-tauri/bundle/windows.json
+            native: true
+          - name: macOS Apple Silicon
+            os: macos-latest
+            ffmpeg: macos-arm64
+            config: src-tauri/bundle/macos.json
+            target: aarch64-apple-darwin
+            native: true
+          # Cross-built on an Apple Silicon runner, so its ffmpeg can't be
+          # run here and the end-to-end tests are skipped.
+          - name: macOS Intel
+            os: macos-latest
+            ffmpeg: macos-x64
+            config: src-tauri/bundle/macos.json
+            target: x86_64-apple-darwin
+            native: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download the ffmpeg to bundle
+        shell: bash
+        run: scripts/fetch-ffmpeg.sh ${{ matrix.ffmpeg }} ${{ !matrix.native && '--no-verify' || '' }}
+
+      - name: Frontend checks
+        run: |
+          pnpm exec tsc --noEmit
+          pnpm test
+
+      # Runs the real export and quality measurement with the exact ffmpeg
+      # that ships in this installer.
+      - name: Backend tests against the bundled ffmpeg
+        if: matrix.native
+        shell: bash
+        working-directory: src-tauri
+        env:
+          SUBTITLES_FFMPEG_DIR: ${{ github.workspace }}/src-tauri/bin
+        run: cargo test --lib -- --include-ignored
+
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: Subtitles __VERSION__
+          releaseDraft: true
+          args: --config ${{ matrix.config }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: subtitles-${{ matrix.ffmpeg }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.dmg
