@@ -119,3 +119,20 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.dmg
+
+  # Replaces the release description with a table of which download is for
+  # which computer, once every platform has built.
+  notes:
+    name: Release notes
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write which-download-for-which-computer table
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          scripts/release-notes.sh "$version" > notes.md
+          gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
